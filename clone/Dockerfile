@@ -1,12 +1,6 @@
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
-ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 sox && rm -rf /var/lib/apt/lists/*
+FROM ghcr.io/cladid/qwen-tts-runpod@sha256:7e0f7bd87b10e4c5a5a93438a57e1c8f7b645c3e44d83b35c686aad1d9994aaf
 WORKDIR /app
-COPY requirements.txt .
-RUN python -m pip install torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 && python -m pip install -r requirements.txt && python -m pip check
-ARG MODEL_REVISION=main
-RUN MODEL_REVISION=${MODEL_REVISION} python -c "import os; from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base', revision=os.environ['MODEL_REVISION'], local_dir='/models/qwen3tts')"
-ENV MODEL_PATH=/models/qwen3tts HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 COPY handler.py .
 RUN python -m py_compile handler.py
+RUN python -c "import inspect; from importlib.metadata import version; from qwen_tts import Qwen3TTSModel; assert version('qwen-tts') == '0.1.1'; assert 'non_streaming_mode' in inspect.signature(Qwen3TTSModel.generate_voice_clone).parameters"
 CMD ["python", "-u", "handler.py"]

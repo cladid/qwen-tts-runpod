@@ -1,5 +1,6 @@
 """Separate Base-model voice-clone experiment; reference supplied per request."""
 import base64
+from contextlib import nullcontext
 import io
 import hashlib
 import os
@@ -31,7 +32,13 @@ def validate_input(job):
     language = inp.get("language", "Italian")
     ref_text = inp.get("ref_text")
     encoded = inp.get("ref_audio_base64")
-    if set(inp) - {"text", "language", "ref_text", "ref_audio_base64"}:
+    non_streaming = inp.get("non_streaming_mode", False)
+    seed = inp.get("seed")
+    if type(non_streaming) is not bool:
+        raise ValueError("non_streaming_mode must be a boolean")
+    if seed is not None and (type(seed) is not int or not 0 <= seed <= 2**32 - 1):
+        raise ValueError("seed must be an integer between 0 and 2**32-1")
+    if set(inp) - {"text", "language", "ref_text", "ref_audio_base64", "non_streaming_mode", "seed"}:
         raise ValueError("unknown input fields")
     if not isinstance(language, str):
         raise ValueError("language must be a string")
@@ -52,7 +59,7 @@ def validate_input(job):
         raise ValueError("invalid reference WAV") from exc
     if not np.isfinite(wav).all() or np.max(np.abs(wav)) < 0.001:
         raise ValueError("reference is silent or invalid")
-    return text.strip(), language, ref_text.strip(), wav, sr, hashlib.sha256(raw).hexdigest()
+    return text.strip(), language, ref_text.strip(), wav, sr, hashlib.sha256(raw).hexdigest(), non_streaming, seed
 
 
 
@@ -71,7 +78,7 @@ def load_model():
 
 def handler(job):
     global CALLS
-    text, language, ref_text, ref_wav, ref_sr, ref_hash = validate_input(job)
+    text, language, ref_text, ref_wav, ref_sr, ref_hash, non_streaming, seed = validate_input(job)
     with LOCK:
         if MODEL is None:
             raise RuntimeError("model not initialized")
@@ -80,11 +87,15 @@ def handler(job):
         started = time.perf_counter()
         torch.cuda.synchronize()
         synthesis_started = time.perf_counter()
-        with torch.inference_mode():
+        rng_context = torch.random.fork_rng(devices=[0]) if seed is not None else nullcontext()
+        with rng_context, torch.inference_mode():
+            if seed is not None:
+                torch.manual_seed(seed)
             wavs, sr = MODEL.generate_voice_clone(
                 text=text, language=language,
                 ref_audio=(ref_wav, ref_sr), ref_text=ref_text,
                 x_vector_only_mode=False, max_new_tokens=2048,
+                non_streaming_mode=non_streaming,
             )
         torch.cuda.synchronize()
         inference_s = time.perf_counter() - synthesis_started
@@ -102,6 +113,8 @@ def handler(job):
         return {
             "model_id": MODEL_ID, "voice": "reference", "reference_sha256": ref_hash, "language": language,
             "sample_rate": int(sr), "duration_s": duration_s,
+            "worker_version": "0.3.0-base-prosody",
+            "non_streaming_mode": non_streaming, "seed": seed,
             "inference_s": inference_s,
             "handler_s": time.perf_counter() - started,
             "model_load_s": MODEL_LOAD_S,
